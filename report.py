@@ -32,5 +32,5 @@ for name in ("flip", "free"):
     print(f"   deals by state {states} · profit €{money:.0f}")
     for x in deals[-5:]:
         print(f"   #{x['no']} {x['at']} {x.get('state')} {x.get('price', 0):.0f}€ {x['title'][:50]}")
-    errs = [l for l in log if "error" in l][-3:]
+    errs = [l for l in log if "error " in l or "error:" in l][-3:]
     print(f"   recent errors: {errs or 'none'}")

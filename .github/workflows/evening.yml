@@ -1,0 +1,36 @@
+name: Evening report
+on:
+  schedule:
+    - cron: "*/15 16-20 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Send a test report now"
+        type: boolean
+        default: false
+permissions:
+  contents: write
+concurrency:
+  group: evening
+  cancel-in-progress: false
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - name: Restore state
+        id: restore
+        env:
+          STATE_KEY: ${{ secrets.STATE_KEY }}
+        run: ./state.sh restore flip && ./state.sh restore free && ./state.sh restore report
+      - name: Send
+        env:
+          FLIP_TG_TOKEN: ${{ secrets.FLIP_TG_TOKEN }}
+          FLIP_TG_CHAT: ${{ secrets.FLIP_TG_CHAT }}
+        run: python3 evening.py ${{ inputs.force && '--force' || '' }}
+      - name: Save report state
+        if: always() && steps.restore.outcome == 'success'
+        env:
+          STATE_KEY: ${{ secrets.STATE_KEY }}
+        run: mkdir -p state/report && ./state.sh save report

@@ -5,8 +5,8 @@
 Replies in Telegram: bought 3 40 · sold 3 90 · skip 3 · stock
 """
 import json, re, statistics, sys, time, urllib.parse
-from common import (BUY_RX, CRACK_RX, JUNK_RX, SCRATCH_RX, Bot, State, age_hours, clean, fetch, is_near, listing_details, now, parse_feed,
-                    price_of, roadblock, safe_say, secret)
+from common import (BUY_RX, CRACK_RX, JUNK_RX, SCRATCH_RX, Bot, State, age_hours, bump_day, clean, fetch, is_near, listing_details, now,
+                    parse_feed, price_of, report_day, roadblock, safe_say, secret)
 
 NAME = "Flip finder"
 DEAL_FEEDS = ["electronics/phones/mobile-phones", "construction/tools-and-technics", "electronics/home-appliances",
@@ -15,7 +15,8 @@ RATIO, MIN_PROFIT, FAR_PROFIT, MAX_RESALE, MIN_COMPS, MAX_BUY = 0.65, 20, 40, 15
 STOCK_CAP, MAX_LOOKUPS, MAX_ALERTS, DAILY_CAP, MAX_AGE_MIN, CACHE_H = 300, 8, 5, 15, 90, 6
 BULKY = ("washing-machine", "refrigerator", "fridge", "freezer", "cooker", "stove", "oven", "dishwasher", "centrifuge")
 MILESTONES = (100, 250, 500, 1000, 2500)
-TOP, DIGEST = 70, 50          # score >= TOP: instant alert with sound · >= DIGEST: silent 19:00 list · below: logged only
+TOP, DIGEST = 70, 50          # easy money (instant) needs score >= TOP · >= DIGEST: in the 20:00 evening report · below: logged
+FAST, EASY_PROFIT = 0.85, 30  # ss.lv ads at the going price stay up 9-22 days (measured 17.09) → relist 15% under to sell in ~3 days
 HELP = "Reply: bought 3 40 · sold 3 90 · skip 3 · stock"
 
 
@@ -93,18 +94,24 @@ def comparables(st, item, match):
     where = item["link"].split("/msg/lv/")[1].rsplit("/", 1)[0]
     cache = st.load("comps_cache.json", {})
     key = f"{where}|{json.dumps(match, sort_keys=True)}|{(item['fields'].get('Stāv.', '') or '')[:4]}"
-    if key in cache and time.time() - cache[key][0] < CACHE_H * 3600:
-        return cache[key][1]
+    if key in cache and time.time() - cache[key][0] < CACHE_H * 3600 and len(cache[key]) > 2:
+        return cache[key][1], cache[key][2]
     used = (item["fields"].get("Stāv.", "lietota") or "lietota").startswith("liet")
     if "model" in match or "family" in match:
         pages = [f"https://www.ss.lv/lv/{where}/" + ("" if n == 1 else f"page{n}.html") for n in (1, 2, 3)]
     else:
         section = "/".join(where.split("/")[:2])
         pages = [f"https://www.ss.lv/lv/{section}/search-result/?q={urllib.parse.quote(match['query'])}"]
-    prices = []
+    prices, days_up = [], None
     for n, url in enumerate(pages, 1):
         s = fetch(url)
         rows = re.findall(r'<tr id="tr_(\d+)"(.*?)</tr>', s, re.S)
+        if n == 1 and len(pages) > 1:
+            new5 = re.findall(r"Par 5 dienām \((\d+)\)", s)
+            last = max([int(x) for x in re.findall(r"/page(\d+)\.html", s)] or [1])
+            active = len(rows) if last == 1 else last * 30 - 15
+            if new5 and int(new5[0]) > 0:
+                days_up = round(active * 5 / int(new5[0]), 1)     # average days an ad stays up here
         for _, row in rows:
             link = re.search(r'href="(/msg/[^"]+)"', row)
             if not link or item["id"] in link.group(1):
@@ -136,9 +143,9 @@ def comparables(st, item, match):
             break
         time.sleep(1.5)
     cache = {k: v for k, v in cache.items() if time.time() - v[0] < CACHE_H * 3600}
-    cache[key] = [time.time(), prices]
+    cache[key] = [time.time(), prices, days_up]
     st.save("comps_cache.json", cache)
-    return prices
+    return prices, days_up
 
 
 def trim(comps):
@@ -155,29 +162,32 @@ def judge(price, comps, kind=None):
     if len(comps) < MIN_COMPS:
         return None, None, False
     going = statistics.median(comps)
+    profit = FAST * going - price                    # relisted 15% under the going price, to sell fast
     if kind in ("console", "tablet") and price < 0.35 * going:
-        return going, going - price, False           # that cheap in these sections = accessory, broken or scam
-    profit = going - price
+        return going, profit, False                  # that cheap in these sections = accessory, broken or scam
     return going, profit, (price <= RATIO * going and profit >= MIN_PROFIT and going <= MAX_RESALE)
 
 
-def score(price, comps, det):
-    """Deal quality 0-100+. Returns (score, reasons). The parameter matrix, v1 (2026-09-17)."""
+def score(price, comps, det, days_up=None):
+    """Deal quality 0-100+. Returns (score, reasons). The parameter matrix, v2 (2026-09-17)."""
     going = statistics.median(comps)
-    off, profit, pts, why = 1 - price / going, going - price, 0, []
+    off, profit, pts, why = 1 - price / going, FAST * going - price, 0, []
     for limit, p in ((0.55, 40), (0.45, 30), (0.35, 20)):
         if off >= limit:
             pts += p
             break
     why.append(f"{off:.0%} under")
     pts += 25 if profit >= 70 else 15 if profit >= 40 else 5 if profit >= 20 else 0
-    why.append(f"+€{profit:.0f}")
+    why.append(f"relist ~€{FAST * going:.0f} → +€{profit:.0f}")
     pts += 15 if len(comps) >= 10 else 10 if len(comps) >= 5 else 0
     why.append(f"{len(comps)} similar")
     spread = (max(comps) - min(comps)) / going
     pts += 5 if spread <= 0.5 else -10 if spread > 1.0 else 0
     if spread > 1.0:
         why.append("similar prices vary a lot")
+    if days_up is not None:
+        pts += 10 if days_up <= 10 else 5 if days_up <= 15 else -10 if days_up > 20 else 0
+        why.append(f"ads here last ~{days_up:.0f} days")
     if is_near(det["loc"]):
         pts += 10
     why.append(det["loc"])
@@ -209,15 +219,8 @@ def profit_of(deals):
 def alert_text(d):
     warn = "⚠️ very cheap — check it works, no prepayment\n" if d["price"] < 0.3 * d["going"] else ""
     night = "🌙 posted overnight — may be gone\n" if d.get("overnight") else ""
-    return (f"🔥 {d.get('score', 0)}/100 · #{d['no']} €{d['price']:.0f} → sells ~€{d['going']:.0f}\n"
+    return (f"🔥 EASY MONEY {d.get('score', 0)}/100 · #{d['no']}\nBuy €{d['price']:.0f} → relist ~€{d.get('relist', d['going']):.0f} · +€{d.get('profit', 0):.0f}\n"
             f"{' · '.join(d.get('why', []))}\n{night}{warn}{d['title']}\n{d['link']}")
-
-
-def digest_text(items):
-    lines = [f"📋 Good but not top today ({len(items)}) — no alert was sent for these; probably gone by now:"]
-    for d in items:
-        lines.append(f"#{d['no']} {d['score']}/100 · €{d['price']:.0f} → ~€{d['going']:.0f} · {d['loc']} · {d['title'][:45]}\n{d['link']}")
-    return "\n".join(lines)
 
 
 def status_text(deals):
@@ -225,13 +228,6 @@ def status_text(deals):
     sold = [d for d in deals if d.get("state") == "sold"]
     return (f"Stock: {len(held)} items, €{stock_of(deals):.0f} (cap €{STOCK_CAP})\n"
             f"Sold: {len(sold)} · profit €{profit_of(deals):.0f}\nDeals sent so far: {sum(1 for d in deals if d.get('sent'))}")
-
-
-def summary_text(stats, deals):
-    return (f"☀️ Flip finder — since the last summary\n"
-            f"Runs {stats.get('runs', 0)} · listings {stats.get('listings', 0)} · price checks {stats.get('price_checks', 0)} · "
-            f"passed base rule {stats.get('deals', 0)} → top {stats.get('top', 0)} · digest {stats.get('digest', 0)} · "
-            f"below bar {stats.get('below_bar', 0)} · errors {stats.get('errors', 0)}\n{status_text(deals)}")
 
 
 def handle_replies(b, meta, deals):
@@ -283,9 +279,9 @@ def scan(dry=False):
     meta, deals = st.load("meta.json", {}), st.load("deals.json", [])
     seen = dict.fromkeys(st.load("seen.json", []))
     t = now()
-    today, quiet, first = t.strftime("%Y-%m-%d"), (t.hour >= 23 or t.hour < 7), (not seen and not dry)
-    reached = lookups = checked = found = errors = 0
-    tiers = {"top": 0, "digest": 0, "below": 0}
+    today, day, quiet, first = t.strftime("%Y-%m-%d"), report_day(t), (t.hour >= 23 or t.hour < 7), (not seen and not dry)
+    reached = lookups = checked = errors = 0
+    tiers = {"top": 0, "worth_a_look": 0, "below": 0}
     for feed in DEAL_FEEDS:
         try:
             items = parse_feed(feed)
@@ -311,7 +307,7 @@ def scan(dry=False):
             lookups += 1
             time.sleep(1.5)
             try:
-                comps = comparables(st, it, match)
+                comps, days_up = comparables(st, it, match)
             except Exception as e:
                 st.log(f"lookup error {query}: {e}")
                 errors += 1
@@ -319,7 +315,7 @@ def scan(dry=False):
             going, profit, ok = judge(it["price"], comps, match.get("kind"))
             comps = trim(comps)
             if dry and going is not None:
-                print(f"  {query[:30]:30} €{it['price']:.0f} vs going €{going:.0f} ({len(comps)} similar) +€{profit:.0f}{'  <- DEAL' if ok else ''}")
+                print(f"  {query[:30]:30} €{it['price']:.0f} vs going €{going:.0f} ({len(comps)} similar, ads last ~{days_up} d) fast +€{profit:.0f}{'  <- DEAL' if ok else ''}")
             if not ok:
                 continue
             det = listing_details(it["link"])
@@ -331,23 +327,23 @@ def scan(dry=False):
                 if dry:
                     print(f"    skipped: {det['loc']} is far and profit under €{FAR_PROFIT}")
                 continue
-            pts, why = score(it["price"], comps, det)
-            tier = "top" if pts >= TOP else "digest" if pts >= DIGEST else "below"
-            found += 1
+            pts, why = score(it["price"], comps, det, days_up)
+            easy = pts >= TOP and profit >= EASY_PROFIT and is_near(det["loc"]) and not CRACK_RX.search(det["desc"])
+            tier = "top" if easy else "worth_a_look" if pts >= DIGEST else "below"
             tiers[tier] += 1
             d = {"no": (deals[-1]["no"] + 1) if deals else 1, "at": t.strftime("%Y-%m-%d %H:%M"), "title": it["title"][:90],
-                 "link": it["link"], "price": it["price"], "going": going, "comps": len(comps), "loc": det["loc"],
-                 "score": pts, "why": why, "tier": tier, "state": "new" if tier == "top" else tier, "sent": False, "overnight": quiet}
+                 "link": it["link"], "price": it["price"], "going": going, "relist": round(FAST * going), "profit": round(profit),
+                 "days_up": days_up, "comps": len(comps), "loc": det["loc"], "score": pts, "why": why, "tier": tier,
+                 "state": "new" if tier == "top" else tier, "sent": False, "overnight": quiet}
             if dry:
                 print(f"    SCORE {pts} → {tier}:", " · ".join(why))
             else:
                 deals.append(d)
     if dry:
-        print(f"checked {checked}, price checks {lookups}, passed base rule {found} {tiers}, errors {errors}")
+        print(f"checked {checked}, price checks {lookups}, {tiers}, errors {errors}")
         return
     b, sent = bot(), 0
     if first:
-        meta["summary_date"] = today
         safe_say(b, "✅ Flip finder now runs on GitHub, 24/7 — laptop open or closed. Deals arrive here.", st)
     if not quiet:
         sent_today = sum(1 for d in deals if d.get("sent_at", "").startswith(today))
@@ -362,31 +358,20 @@ def scan(dry=False):
             if safe_say(b, alert_text(d), st):
                 d["sent"], d["sent_at"] = True, t.strftime("%Y-%m-%d %H:%M")
                 sent += 1
-    if t.hour >= 19 and meta.get("digest_date") != today:
-        todays = sorted((d for d in deals if d.get("state") == "digest" and d["at"].startswith(today)), key=lambda d: -d["score"])[:8]
-        if not todays or safe_say(b, digest_text(todays), st, silent=True):
-            meta["digest_date"] = today
-            for d in todays:
-                d["state"] = "in_digest"
     try:
         handle_replies(b, meta, deals)
     except Exception as e:
         st.log(f"telegram error: {e}")
         errors += 1
-    stats = meta.setdefault("stats", {})
-    for k, v in (("runs", 1), ("listings", checked), ("price_checks", lookups), ("deals", found), ("top", tiers["top"]),
-                 ("digest", tiers["digest"]), ("below_bar", tiers["below"]), ("errors", errors)):
-        stats[k] = stats.get(k, 0) + v
     roadblock(meta, reached > 0, b, NAME, st)
-    if t.hour >= 7 and meta.get("summary_date") != today and safe_say(b, summary_text(stats, deals), st):
-        meta["summary_date"] = today
-        meta["days"] = (meta.get("days", []) + [{"date": today, **stats}])[-60:]
-        meta["stats"] = {}
+    bump_day(meta, day, runs=1, listings=checked, price_checks=lookups, top=tiers["top"], worth_a_look=tiers["worth_a_look"],
+             below_bar=tiers["below"], sent=sent, errors=errors)
+    meta.pop("stats", None)
     meta["last_run"] = t.strftime("%Y-%m-%d %H:%M")
     st.save("seen.json", list(seen)[-6000:])
     st.save("deals.json", deals[-500:])
     st.save("meta.json", meta)
-    line = f"{'seeded ' if first else ''}checked {checked}, price checks {lookups}, base {found} {tiers}, sent {sent}, errors {errors}"
+    line = f"{'seeded ' if first else ''}checked {checked}, price checks {lookups}, {tiers}, sent {sent}, errors {errors}"
     st.log(line)
     print(line)
 

@@ -6,7 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 key = subprocess.run(["security", "find-generic-password", "-a", getpass.getuser(), "-s", "deal-finders-state-key", "-w"],
                      capture_output=True, text=True).stdout.strip()
-for name in ("flip", "free"):
+for name in ("flip", "free", "report"):
     if subprocess.run(["git", "-C", str(ROOT), "fetch", "-q", "origin", f"state-{name}"], capture_output=True).returncode:
         print(f"{name}: no state on GitHub yet")
         continue
@@ -22,9 +22,10 @@ for name in ("flip", "free"):
         meta = json.loads((base / "meta.json").read_text()) if (base / "meta.json").exists() else {}
         deals = json.loads((base / "deals.json").read_text()) if (base / "deals.json").exists() else []
         log = (base / "log.txt").read_text().splitlines() if (base / "log.txt").exists() else []
-    print(f"== {name}: last run {meta.get('last_run', '?')} · since morning {meta.get('stats', {})}")
-    for day in meta.get("days", [])[-3:]:
-        print(f"   {day}")
+    print(f"== {name}: last run {meta.get('last_run', '?')}")
+    days = meta.get("days", {})
+    for day in (sorted(days)[-3:] if isinstance(days, dict) else []):
+        print(f"   {day}: {days[day]}")
     states = {}
     for x in deals:
         states[x.get("state")] = states.get(x.get("state"), 0) + 1

@@ -5,8 +5,8 @@ Sources: ss.lv listings that say free (atdodu, par velti, отдам…) and new
 Replies (once it has its own bot): picked 3 · sold 3 40 · skip 3 · stock
 """
 import re, sys, time
-from common import (BUY_RX, FREE_RX, JUNK_RX, Bot, State, age_hours, clean, fetch, is_near, listing_location, now,
-                    parse_feed, roadblock, safe_say, secret)
+from common import (BUY_RX, FREE_RX, JUNK_RX, Bot, State, age_hours, bump_day, clean, fetch, is_near, listing_location, now,
+                    parse_feed, report_day, roadblock, safe_say, secret)
 
 NAME = "Free finder"
 FEEDS = ["home-stuff", "for-children", "electronics", "construction", "entertainment"]
@@ -18,7 +18,12 @@ RESELL_RX = re.compile(r"velosip|ķiver|ratiņ|autosēd|krēsl|galds|galdiņ|ska
                        r"ноутбук|кофе|пылесос|микроволн|инструмент|дрель|пила|коляск|кроват|лампа|зеркал", re.I)
 SKIP_RX = re.compile(r"grāmat|augi|stād|dzīvžog|drēb|apģērb|apav|pārtik|ēdien|kaķ|suņ|kucēn|paklāj|trauk|zeme|malk|gruž|"
                      r"книг|растен|одежд|обув|котён|щен|земл|дров|мусор", re.I)
-MAX_ALERTS, DAILY_CAP, MAX_AGE_MIN = 5, 20, 120
+# instant alert only for free things that resell well and fit in a car → warehouse; everything else waits for the 20:00 report
+HIGH_VALUE_RX = re.compile(r"televiz|\btv\b|monitor|dator|portatīv|noutbuk|laptop|playstation|\bps[345]\b|xbox|nintendo|kafijas (automāt|mašīn)|"
+                           r"espresso|robot|velosip|skrejrit|iphone|ipad|samsung|planšet|printer|fotoaparāt|kamera|skaļrun|soundbar|"
+                           r"телевизор|монитор|ноутбук|компьютер|велосипед|самокат|кофемашин|приставк", re.I)
+TOO_BIG_RX = re.compile(r"ledusskap|veļas mašīn|trauku mašīn|plīts|dīvān|skapis|gulta|virtuves komplekt|пианино|холодильник|стиральн|диван|шкаф", re.I)
+MAX_ALERTS, DAILY_CAP, MAX_AGE_MIN = 5, 10, 120
 HELP = "Reply: picked 3 · sold 3 40 · skip 3 · stock"
 
 
@@ -52,7 +57,7 @@ def site_location(slug, title):
 
 def alert_text(d):
     night = "🌙 posted overnight — may be gone\n" if d.get("overnight") else ""
-    return f"F{d['no']} 🆓 FREE · {d['loc']}\n{night}{d['title']}\n{d['link']}"
+    return f"🔥 FREE, RESELLS WELL · F{d['no']} · {d['loc']}\n{night}{d['title']}\n{d['link']}"
 
 
 def status_text(deals):
@@ -99,10 +104,10 @@ def scan(dry=False):
     meta, deals = st.load("meta.json", {}), st.load("deals.json", [])
     seen = dict.fromkeys(st.load("seen.json", []))
     t = now()
-    today, quiet = t.strftime("%Y-%m-%d"), (t.hour >= 23 or t.hour < 7)
+    today, day, quiet = t.strftime("%Y-%m-%d"), report_day(t), (t.hour >= 23 or t.hour < 7)
     first_feed = not any(not k.startswith("am:") for k in seen) and not dry
     first_site = not any(k.startswith("am:") for k in seen) and not dry
-    reached = giveaways = found = errors = 0
+    reached = giveaways = errors = 0
     new = []
     for feed in FEEDS:
         try:
@@ -148,18 +153,22 @@ def scan(dry=False):
     except Exception as e:
         st.log(f"site error: {e}")
         errors += 1
-    if dry:
-        print(f"giveaways seen {giveaways}, worth it near Riga {len(new)}, errors {errors}")
-        return
+    instant = 0
     for n in new:
-        found += 1
-        deals.append({"no": (deals[-1]["no"] + 1) if deals else 1, "at": t.strftime("%Y-%m-%d %H:%M"), "state": "new",
-                      "sent": False, "overnight": quiet, **n})
+        hot = bool(HIGH_VALUE_RX.search(n["title"])) and not TOO_BIG_RX.search(n["title"])
+        instant += hot
+        if dry:
+            print(f"    → {'INSTANT' if hot else 'evening report'}: {n['title'][:60]}")
+        else:
+            deals.append({"no": (deals[-1]["no"] + 1) if deals else 1, "at": t.strftime("%Y-%m-%d %H:%M"),
+                          "state": "new" if hot else "listed", "sent": False, "overnight": quiet, **n})
+    if dry:
+        print(f"giveaways seen {giveaways}, worth it near Riga {len(new)}, instant {instant}, errors {errors}")
+        return
     b, sent = bot(), 0
     if first_feed or first_site:
-        meta["summary_date"] = today
         where = "here" if b.replies else "in Flip finder's chat until it gets its own bot"
-        safe_say(b, f"✅ Free finder now runs on GitHub, 24/7. Giveaways near Riga worth reselling arrive {where}.", st)
+        safe_say(b, f"✅ Free finder now runs on GitHub, 24/7. Free things near Riga that resell well arrive {where}.", st)
     if not quiet:
         sent_today = sum(1 for d in deals if d.get("sent_at", "").startswith(today))
         for d in deals:
@@ -179,21 +188,15 @@ def scan(dry=False):
         except Exception as e:
             st.log(f"telegram error: {e}")
             errors += 1
-    stats = meta.setdefault("stats", {})
-    for k, v in (("runs", 1), ("giveaways", giveaways), ("worth_it", found), ("errors", errors)):
-        stats[k] = stats.get(k, 0) + v
     roadblock(meta, reached > 0, b, NAME, st)
-    summary = (f"☀️ Free finder — since the last summary\nRuns {stats.get('runs', 0)} · giveaways seen {stats.get('giveaways', 0)} · "
-               f"worth picking up near Riga {stats.get('worth_it', 0)} · errors {stats.get('errors', 0)}\n{status_text(deals)}")
-    if t.hour >= 7 and meta.get("summary_date") != today and safe_say(b, summary, st):
-        meta["summary_date"] = today
-        meta["days"] = (meta.get("days", []) + [{"date": today, **stats}])[-60:]
-        meta["stats"] = {}
+    bump_day(meta, day, runs=1, giveaways=giveaways, worth_it=len(new), instant=instant, sent=sent, errors=errors)
+    for k in ("stats", "summary_date"):
+        meta.pop(k, None)
     meta["last_run"] = t.strftime("%Y-%m-%d %H:%M")
     st.save("seen.json", list(seen)[-6000:])
     st.save("deals.json", deals[-500:])
     st.save("meta.json", meta)
-    line = f"{'seeded ' if first_feed or first_site else ''}giveaways {giveaways}, worth it {found}, sent {sent}, errors {errors}"
+    line = f"{'seeded ' if first_feed or first_site else ''}giveaways {giveaways}, worth it {len(new)}, instant {instant}, sent {sent}, errors {errors}"
     st.log(line)
     print(line)
 

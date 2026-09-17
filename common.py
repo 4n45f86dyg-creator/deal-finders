@@ -1,6 +1,6 @@
 """Shared plumbing for the deal finders: fetching, secrets, Telegram, state, Riga time."""
 import email.utils, getpass, html, json, os, re, subprocess, sys, urllib.parse, urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -171,3 +171,19 @@ def roadblock(meta, reachable, bot, name, st):
         meta["fail_runs"] = meta.get("fail_runs", 0) + 1
         if meta["fail_runs"] == 3:
             safe_say(bot, f"🚧 {name}: can't reach ss.lv for 3 runs in a row. It keeps retrying — nothing for you to do yet.", st)
+
+
+def report_day(t):
+    """Stats day for the 20:00 evening report: runs from 20:00 yesterday to 19:59 today count as today."""
+    return (t + timedelta(hours=4)).strftime("%Y-%m-%d")
+
+
+def bump_day(meta, day, **counts):
+    if not isinstance(meta.get("days"), dict):
+        meta["days"] = {}
+    days = meta["days"]
+    cur = days.setdefault(day, {})
+    for k, v in counts.items():
+        cur[k] = cur.get(k, 0) + v
+    for old in sorted(days)[:-60]:
+        del days[old]

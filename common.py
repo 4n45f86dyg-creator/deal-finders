@@ -45,8 +45,9 @@ class Bot:
         body = urllib.parse.urlencode(params).encode()
         return json.loads(fetch(f"https://api.telegram.org/bot{self.token}/{method}", data=body))
 
-    def say(self, text):
-        return self.call("sendMessage", chat_id=self.chat, text=text, disable_web_page_preview="true")
+    def say(self, text, silent=False):
+        return self.call("sendMessage", chat_id=self.chat, text=text, disable_web_page_preview="true",
+                         disable_notification="true" if silent else "false")
 
     def incoming(self, offset):
         """Boss's messages since offset -> (new offset, texts). Messages from anyone else are ignored."""
@@ -59,9 +60,9 @@ class Bot:
         return offset, texts
 
 
-def safe_say(bot, text, st=None):
+def safe_say(bot, text, st=None, silent=False):
     try:
-        return bool(bot.say(text).get("ok"))
+        return bool(bot.say(text, silent=silent).get("ok"))
     except Exception as e:
         if st:
             st.log(f"telegram error: {e}")
@@ -118,6 +119,29 @@ def parse_feed(path):
                     "title": clean(title.group(1)) if title else "", "fields": fields,
                     "price": price_of(fields.get("Cena", "")), "cena": fields.get("Cena", "")})
     return out
+
+
+BATTERY_RX = re.compile(r"(\d{2,3})\s*%\s*(?:akumul|bater|batar|battar|батар|аккум|battery|bat\b)|"
+                        r"(?:akumul|bater|batar|battar|батар|аккум|battery|bat\b)\w*[^\d%]{0,25}?(\d{2,3})\s*%", re.I)
+CRACK_RX = re.compile(r"saplīs|ieplaisāj|plaisa|(?<!ne)sasist|трещин|треснут|cracked", re.I)
+SCRATCH_RX = re.compile(r"skrāpēj|skrāpēt|nobružāj|царапин|потертост|scratch", re.I)
+
+
+def listing_details(link):
+    """Everything the scorer reads from a listing page: location, full description, photos, dealer, battery, damage."""
+    try:
+        s = fetch(link)
+    except Exception:
+        return {"loc": "?", "desc": "", "photos": 0, "dealer": False, "battery": None}
+    m = re.search(r"(?:Pilsēta, rajons|Pilsēta|Rajons|Vieta):\s*</td>\s*<td[^>]*>(.*?)</td>", s, re.S)
+    d = re.search(r'<div id="msg_div_msg"[^>]*>(.*?)<table', s, re.S)
+    desc = clean(d.group(1)) if d else ""
+    photos = s.count("pic_dv_thumbnail") or len(set(re.findall(r"i\.ss\.lv/gallery/[\d/]+/(\d+)\.", s)))
+    b = BATTERY_RX.search(desc)
+    battery = int(b.group(1) or b.group(2)) if b else None
+    return {"loc": clean(m.group(1)) if m else "?", "desc": desc, "photos": photos,
+            "dealer": bool(re.search(r">\s*Uzņēmums\s*<|lombard|Lots Nr", s, re.I)),
+            "battery": battery if battery and battery <= 100 else None}
 
 
 def listing_location(link):

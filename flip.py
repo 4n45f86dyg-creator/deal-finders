@@ -5,7 +5,7 @@
 Replies in Telegram: bought 3 40 · sold 3 90 · skip 3 · stock
 """
 import json, re, statistics, sys, time, urllib.parse
-from common import (BUY_RX, JUNK_RX, Bot, State, age_hours, clean, fetch, is_near, listing_location, now, parse_feed,
+from common import (BUY_RX, CRACK_RX, JUNK_RX, SCRATCH_RX, Bot, State, age_hours, clean, fetch, is_near, listing_details, now, parse_feed,
                     price_of, roadblock, safe_say, secret)
 
 NAME = "Flip finder"
@@ -15,6 +15,7 @@ RATIO, MIN_PROFIT, FAR_PROFIT, MAX_RESALE, MIN_COMPS, MAX_BUY = 0.65, 20, 40, 15
 STOCK_CAP, MAX_LOOKUPS, MAX_ALERTS, DAILY_CAP, MAX_AGE_MIN, CACHE_H = 300, 8, 5, 15, 90, 6
 BULKY = ("washing-machine", "refrigerator", "fridge", "freezer", "cooker", "stove", "oven", "dishwasher", "centrifuge")
 MILESTONES = (100, 250, 500, 1000, 2500)
+TOP, DIGEST = 70, 50          # score >= TOP: instant alert with sound · >= DIGEST: silent 19:00 list · below: logged only
 HELP = "Reply: bought 3 40 · sold 3 90 · skip 3 · stock"
 
 
@@ -92,6 +93,43 @@ def judge(price, comps):
     return going, profit, (price <= RATIO * going and profit >= MIN_PROFIT and going <= MAX_RESALE)
 
 
+def score(price, comps, det):
+    """Deal quality 0-100+. Returns (score, reasons). The parameter matrix, v1 (2026-09-17)."""
+    going = statistics.median(comps)
+    off, profit, pts, why = 1 - price / going, going - price, 0, []
+    for limit, p in ((0.55, 40), (0.45, 30), (0.35, 20)):
+        if off >= limit:
+            pts += p
+            break
+    why.append(f"{off:.0%} under")
+    pts += 25 if profit >= 70 else 15 if profit >= 40 else 5 if profit >= 20 else 0
+    why.append(f"+€{profit:.0f}")
+    pts += 15 if len(comps) >= 10 else 10 if len(comps) >= 5 else 0
+    why.append(f"{len(comps)} similar")
+    spread = (max(comps) - min(comps)) / going
+    pts += 5 if spread <= 0.5 else -10 if spread > 1.0 else 0
+    if spread > 1.0:
+        why.append("similar prices vary a lot")
+    if is_near(det["loc"]):
+        pts += 10
+    why.append(det["loc"])
+    pts += -15 if det["photos"] == 0 else 5 if det["photos"] >= 3 else 0
+    why.append(f"{det['photos']} photos")
+    if det["dealer"]:
+        pts -= 5
+        why.append("shop/pawnshop")
+    if det["battery"] is not None:
+        pts += -15 if det["battery"] < 80 else -5 if det["battery"] < 85 else 5 if det["battery"] >= 90 else 0
+        why.append(f"battery {det['battery']}%")
+    if CRACK_RX.search(det["desc"]):
+        pts -= 50
+        why.append("cracked/smashed mentioned")
+    elif SCRATCH_RX.search(det["desc"]):
+        pts -= 5
+        why.append("scratches mentioned")
+    return pts, why
+
+
 def stock_of(deals):
     return sum(d.get("bought", 0) for d in deals if d.get("state") == "bought")
 
@@ -103,8 +141,15 @@ def profit_of(deals):
 def alert_text(d):
     warn = "⚠️ very cheap — check it works, no prepayment\n" if d["price"] < 0.3 * d["going"] else ""
     night = "🌙 posted overnight — may be gone\n" if d.get("overnight") else ""
-    return (f"#{d['no']} 💰 €{d['price']:.0f} → sells ~€{d['going']:.0f} ({d['comps']} similar) · +€{d['going'] - d['price']:.0f}\n"
-            f"{night}{warn}{d['loc']} · {d['title']}\n{d['link']}")
+    return (f"🔥 {d.get('score', 0)}/100 · #{d['no']} €{d['price']:.0f} → sells ~€{d['going']:.0f}\n"
+            f"{' · '.join(d.get('why', []))}\n{night}{warn}{d['title']}\n{d['link']}")
+
+
+def digest_text(items):
+    lines = [f"📋 Good but not top today ({len(items)}) — no alert was sent for these; probably gone by now:"]
+    for d in items:
+        lines.append(f"#{d['no']} {d['score']}/100 · €{d['price']:.0f} → ~€{d['going']:.0f} · {d['loc']} · {d['title'][:45]}\n{d['link']}")
+    return "\n".join(lines)
 
 
 def status_text(deals):
@@ -117,7 +162,8 @@ def status_text(deals):
 def summary_text(stats, deals):
     return (f"☀️ Flip finder — since the last summary\n"
             f"Runs {stats.get('runs', 0)} · listings {stats.get('listings', 0)} · price checks {stats.get('price_checks', 0)} · "
-            f"deals {stats.get('deals', 0)} · errors {stats.get('errors', 0)}\n{status_text(deals)}")
+            f"passed base rule {stats.get('deals', 0)} → top {stats.get('top', 0)} · digest {stats.get('digest', 0)} · "
+            f"below bar {stats.get('below_bar', 0)} · errors {stats.get('errors', 0)}\n{status_text(deals)}")
 
 
 def handle_replies(b, meta, deals):
@@ -171,6 +217,7 @@ def scan(dry=False):
     t = now()
     today, quiet, first = t.strftime("%Y-%m-%d"), (t.hour >= 23 or t.hour < 7), (not seen and not dry)
     reached = lookups = checked = found = errors = 0
+    tiers = {"top": 0, "digest": 0, "below": 0}
     for feed in DEAL_FEEDS:
         try:
             items = parse_feed(feed)
@@ -206,19 +253,28 @@ def scan(dry=False):
                 print(f"  {query[:30]:30} €{it['price']:.0f} vs going €{going:.0f} ({len(comps)} similar) +€{profit:.0f}{'  <- DEAL' if ok else ''}")
             if not ok:
                 continue
-            loc = listing_location(it["link"])
-            if not (is_near(loc) or profit >= FAR_PROFIT):
+            det = listing_details(it["link"])
+            if JUNK_RX.search(det["desc"]) or BUY_RX.search(det["desc"][:60]):
+                if dry:
+                    print("    skipped: warning words in the full description")
                 continue
+            if not (is_near(det["loc"]) or profit >= FAR_PROFIT):
+                if dry:
+                    print(f"    skipped: {det['loc']} is far and profit under €{FAR_PROFIT}")
+                continue
+            pts, why = score(it["price"], comps, det)
+            tier = "top" if pts >= TOP else "digest" if pts >= DIGEST else "below"
             found += 1
+            tiers[tier] += 1
             d = {"no": (deals[-1]["no"] + 1) if deals else 1, "at": t.strftime("%Y-%m-%d %H:%M"), "title": it["title"][:90],
-                 "link": it["link"], "price": it["price"], "going": going, "comps": len(comps), "loc": loc,
-                 "state": "new", "sent": False, "overnight": quiet}
+                 "link": it["link"], "price": it["price"], "going": going, "comps": len(comps), "loc": det["loc"],
+                 "score": pts, "why": why, "tier": tier, "state": "new" if tier == "top" else tier, "sent": False, "overnight": quiet}
             if dry:
-                print("  ALERT (dry):", alert_text(d).replace("\n", " | "))
+                print(f"    SCORE {pts} → {tier}:", " · ".join(why))
             else:
                 deals.append(d)
     if dry:
-        print(f"checked {checked}, price checks {lookups}, deals {found}, errors {errors}")
+        print(f"checked {checked}, price checks {lookups}, passed base rule {found} {tiers}, errors {errors}")
         return
     b, sent = bot(), 0
     if first:
@@ -237,13 +293,20 @@ def scan(dry=False):
             if safe_say(b, alert_text(d), st):
                 d["sent"], d["sent_at"] = True, t.strftime("%Y-%m-%d %H:%M")
                 sent += 1
+    if t.hour >= 19 and meta.get("digest_date") != today:
+        todays = sorted((d for d in deals if d.get("state") == "digest" and d["at"].startswith(today)), key=lambda d: -d["score"])[:8]
+        if not todays or safe_say(b, digest_text(todays), st, silent=True):
+            meta["digest_date"] = today
+            for d in todays:
+                d["state"] = "in_digest"
     try:
         handle_replies(b, meta, deals)
     except Exception as e:
         st.log(f"telegram error: {e}")
         errors += 1
     stats = meta.setdefault("stats", {})
-    for k, v in (("runs", 1), ("listings", checked), ("price_checks", lookups), ("deals", found), ("errors", errors)):
+    for k, v in (("runs", 1), ("listings", checked), ("price_checks", lookups), ("deals", found), ("top", tiers["top"]),
+                 ("digest", tiers["digest"]), ("below_bar", tiers["below"]), ("errors", errors)):
         stats[k] = stats.get(k, 0) + v
     roadblock(meta, reached > 0, b, NAME, st)
     if t.hour >= 7 and meta.get("summary_date") != today and safe_say(b, summary_text(stats, deals), st):
@@ -254,7 +317,7 @@ def scan(dry=False):
     st.save("seen.json", list(seen)[-6000:])
     st.save("deals.json", deals[-500:])
     st.save("meta.json", meta)
-    line = f"{'seeded ' if first else ''}checked {checked}, price checks {lookups}, deals {found}, sent {sent}, errors {errors}"
+    line = f"{'seeded ' if first else ''}checked {checked}, price checks {lookups}, base {found} {tiers}, sent {sent}, errors {errors}"
     st.log(line)
     print(line)
 

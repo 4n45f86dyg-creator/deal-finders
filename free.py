@@ -116,6 +116,9 @@ def scan(dry=False):
         except Exception as e:
             st.log(f"feed error {feed}: {e}")
             errors += 1
+            if errors >= 2 and reached == 0:
+                st.log("ss.lv unreachable from this GitHub server — skipping the rest of this run")
+                break
             continue
         for it in items:
             if it["id"] in seen and not dry:

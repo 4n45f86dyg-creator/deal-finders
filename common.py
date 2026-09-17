@@ -21,7 +21,7 @@ def now():
     return datetime.now(RIGA)
 
 
-def fetch(url, data=None, timeout=25):
+def fetch(url, data=None, timeout=15):
     req = urllib.request.Request(url, data=data, headers=UA)
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read().decode("utf-8", "ignore")

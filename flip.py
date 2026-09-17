@@ -10,7 +10,7 @@ from common import (BUY_RX, CRACK_RX, JUNK_RX, SCRATCH_RX, Bot, State, age_hours
 
 NAME = "Flip finder"
 DEAL_FEEDS = ["electronics/phones/mobile-phones", "construction/tools-and-technics", "electronics/home-appliances",
-              "electronics/computers", "electronics/audio-video-dvd-sat", "for-children/carriages"]
+              "electronics/computers", "electronics/audio-video-dvd-sat", "for-children/carriages"]   # computers includes consoles + tablets
 RATIO, MIN_PROFIT, FAR_PROFIT, MAX_RESALE, MIN_COMPS, MAX_BUY = 0.65, 20, 40, 150, 3, 100
 STOCK_CAP, MAX_LOOKUPS, MAX_ALERTS, DAILY_CAP, MAX_AGE_MIN, CACHE_H = 300, 8, 5, 15, 90, 6
 BULKY = ("washing-machine", "refrigerator", "fridge", "freezer", "cooker", "stove", "oven", "dishwasher", "centrifuge")
@@ -23,8 +23,55 @@ def bot():
     return Bot(secret("FLIP_TG_TOKEN", "telegram-flip-bot"), secret("FLIP_TG_CHAT", "telegram-flip-chat"))
 
 
+ACCESSORY_RX = re.compile(r"^\W*(?:\S+\s+){0,3}(pult|kontrol[ie]er|kontral|kontroler|joy-?con|для|priekš|dualsense|dualshock|spēl|disk|диск|игр|джойстик|геймпад|"
+                          r"controller|joystick|stūr|руль|lādētāj|kabel|кабел|statīv|vāciņ|maciņ|чехол|case\b|remont|ремонт|stylus|pildspalv)", re.I)
+
+
+def console_family(t):
+    t = t.lower()
+    if re.search(r"ps\s?5|playstation\s?5", t):
+        return "ps5 digital" if "digital" in t else "ps5"
+    if re.search(r"ps\s?4|playstation\s?4", t):
+        return "ps4 pro" if re.search(r"\bpro\b", t) else "ps4"
+    if re.search(r"ps\s?3|playstation\s?3", t):
+        return "ps3"
+    for rx, fam in ((r"series\s?x", "xbox series x"), (r"series\s?s", "xbox series s"), (r"one\s?x\b", "xbox one x"),
+                    (r"xbox\s?one", "xbox one"), (r"steam\s?deck", "steam deck")):
+        if re.search(rx, t):
+            return fam
+    if "switch" in t:
+        return "switch oled" if "oled" in t else "switch lite" if "lite" in t else "switch"
+    return None
+
+
+def tablet_family(t):
+    t = t.lower().replace("(", " ").replace(")", " ")
+    apple = "ipad" in t or "apple" in t
+    for rx, name in ((r"ipad\s*pro\s*(11|12[.,]9|10[.,]5|9[.,]7|13)(?!\d)", "ipad pro "), (r"air\s*(\d)(?![\d.,])", "ipad air "),
+                     (r"mini\s*(\d)(?![\d.,])", "ipad mini ")):
+        m = re.search(rx, t)
+        if m and apple:
+            return name + m.group(1).replace(",", ".")
+    if apple and not re.search(r"\b(air|mini|pro)\b", t):
+        m = re.search(r"ipad\s*(\d{1,2})(?![\d.,])", t) or re.search(r"\b(\d{1,2})\s*(?:th|st|nd|rd)?\s*gen", t)
+        if m:
+            return "ipad " + m.group(1)
+    m = re.search(r"tab\s*(s\d{1,2}(?:\s*(?:fe|ultra|plus|\+))?|a\d{1,2}(?:\s*lite)?)(?![\d])", t)
+    return "galaxy tab " + re.sub(r"\s+", " ", m.group(1)).strip() if m else None
+
+
 def model_query(item, feed):
     f = item["fields"]
+    if "/game-consoles/" in item["link"]:
+        fam = console_family(f"{f.get('Konsole', '')} {item['title']}")
+        if not fam or ACCESSORY_RX.search(item["title"]) or not (f.get("Stāv.", "") or "").startswith("liet"):
+            return None, None
+        return fam, {"family": fam, "kind": "console"}
+    if "/tablets/" in item["link"]:
+        fam = tablet_family(f"{f.get('Marka', '')} {f.get('Modelis', '')} {item['title']}")
+        if not fam or ACCESSORY_RX.search(item["title"]):
+            return None, None
+        return fam, {"family": fam, "kind": "tablet", "storage": f.get("Flash", "")}
     if "phones" in feed:
         mk, md = f.get("Marka", ""), f.get("Modelis", "")
         if not mk or not md or md.lower() in ("cits", "другой"):
@@ -49,7 +96,7 @@ def comparables(st, item, match):
     if key in cache and time.time() - cache[key][0] < CACHE_H * 3600:
         return cache[key][1]
     used = (item["fields"].get("Stāv.", "lietota") or "lietota").startswith("liet")
-    if "model" in match:
+    if "model" in match or "family" in match:
         pages = [f"https://www.ss.lv/lv/{where}/" + ("" if n == 1 else f"page{n}.html") for n in (1, 2, 3)]
     else:
         section = "/".join(where.split("/")[:2])
@@ -68,7 +115,17 @@ def comparables(st, item, match):
             p = price_of(cells[-1])
             if p is None or (used and "jaun." in cells):
                 continue
-            if "model" in match:
+            if "family" in match:
+                text = " ".join(cells[:-1])
+                if ACCESSORY_RX.search(cells[0]):
+                    continue
+                fam = console_family(text) if match["kind"] == "console" else tablet_family(text)
+                if fam != match["family"]:
+                    continue
+                if match.get("storage") and re.search(r"\b(16|32|64|128|256|512|1024)\b", " ".join(cells[1:-1])) \
+                        and not re.search(rf"\b{re.escape(match['storage'])}\b", " ".join(cells[1:-1])):
+                    continue
+            elif "model" in match:
                 nums = [c for c in cells[1:-1] if re.fullmatch(r"\d{1,4}", c)]
                 if match["storage"] and nums and nums[0] != match["storage"]:
                     continue
@@ -84,11 +141,22 @@ def comparables(st, item, match):
     return prices
 
 
-def judge(price, comps):
+def trim(comps):
+    """Drop asking prices far from the rest (placeholders, accessories, bundles) before taking the middle price."""
+    if len(comps) < 3:
+        return comps
+    mid = statistics.median(comps)
+    return [c for c in comps if 0.4 * mid <= c <= 2.5 * mid]
+
+
+def judge(price, comps, kind=None):
     """The deal rule. Returns (going price, profit, is_deal)."""
+    comps = trim(comps)
     if len(comps) < MIN_COMPS:
         return None, None, False
     going = statistics.median(comps)
+    if kind in ("console", "tablet") and price < 0.35 * going:
+        return going, going - price, False           # that cheap in these sections = accessory, broken or scam
     profit = going - price
     return going, profit, (price <= RATIO * going and profit >= MIN_PROFIT and going <= MAX_RESALE)
 
@@ -248,7 +316,8 @@ def scan(dry=False):
                 st.log(f"lookup error {query}: {e}")
                 errors += 1
                 continue
-            going, profit, ok = judge(it["price"], comps)
+            going, profit, ok = judge(it["price"], comps, match.get("kind"))
+            comps = trim(comps)
             if dry and going is not None:
                 print(f"  {query[:30]:30} €{it['price']:.0f} vs going €{going:.0f} ({len(comps)} similar) +€{profit:.0f}{'  <- DEAL' if ok else ''}")
             if not ok:

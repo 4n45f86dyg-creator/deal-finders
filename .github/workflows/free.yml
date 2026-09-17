@@ -1,0 +1,33 @@
+name: Free finder
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: free
+  cancel-in-progress: false
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v5
+      - name: Restore state
+        id: restore
+        env:
+          STATE_KEY: ${{ secrets.STATE_KEY }}
+        run: ./state.sh restore free
+      - name: Scan
+        env:
+          FREE_TG_TOKEN: ${{ secrets.FREE_TG_TOKEN }}
+          FREE_TG_CHAT: ${{ secrets.FREE_TG_CHAT }}
+          FLIP_TG_TOKEN: ${{ secrets.FLIP_TG_TOKEN }}
+          FLIP_TG_CHAT: ${{ secrets.FLIP_TG_CHAT }}
+        run: python3 free.py scan
+      - name: Save state
+        if: always() && steps.restore.outcome == 'success'
+        env:
+          STATE_KEY: ${{ secrets.STATE_KEY }}
+        run: ./state.sh save free

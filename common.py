@@ -161,6 +161,14 @@ def age_hours(stamp, t):
     return (t - datetime.strptime(stamp, "%Y-%m-%d %H:%M").replace(tzinfo=RIGA)).total_seconds() / 3600
 
 
+def days_since(stamp, t):
+    """Whole days between a YYYY-MM-DD stamp and now. -1 when the stamp is missing or unreadable."""
+    try:
+        return (t.date() - datetime.strptime(stamp[:10], "%Y-%m-%d").date()).days
+    except (TypeError, ValueError):
+        return -1
+
+
 def roadblock(meta, reachable, bot, name, st):
     """Tell Boss once when ss.lv stops answering for 3 runs, and once when it's back."""
     if reachable:

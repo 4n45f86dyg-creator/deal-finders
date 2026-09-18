@@ -1,36 +1,31 @@
-name: Evening report
+name: Job watcher
 on:
   schedule:
-    - cron: "*/15 16-20 * * *"
+    - cron: "30 5 * * 1-5"
   workflow_dispatch:
-    inputs:
-      force:
-        description: "Send a test report now"
-        type: boolean
-        default: false
 permissions:
   contents: write
 concurrency:
-  group: evening
+  group: jobs
   cancel-in-progress: false
 jobs:
-  report:
+  scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
       - name: Restore state
         id: restore
         env:
           STATE_KEY: ${{ secrets.STATE_KEY }}
-        run: ./state.sh restore flip && ./state.sh restore free && ./state.sh restore jobs && ./state.sh restore report
-      - name: Send
+        run: ./state.sh restore jobs
+      - name: Scan
         env:
           FLIP_TG_TOKEN: ${{ secrets.FLIP_TG_TOKEN }}
           FLIP_TG_CHAT: ${{ secrets.FLIP_TG_CHAT }}
-        run: python3 evening.py ${{ inputs.force && '--force' || '' }}
-      - name: Save report state
+        run: python3 jobs.py scan
+      - name: Save state
         if: always() && steps.restore.outcome == 'success'
         env:
           STATE_KEY: ${{ secrets.STATE_KEY }}
-        run: mkdir -p state/report && ./state.sh save report
+        run: mkdir -p state/jobs && ./state.sh save jobs

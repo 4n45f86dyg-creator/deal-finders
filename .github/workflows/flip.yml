@@ -19,6 +19,12 @@ jobs:
         env:
           STATE_KEY: ${{ secrets.STATE_KEY }}
         run: ./state.sh restore flip
+      - name: Restore job leads
+        id: jobs
+        continue-on-error: true
+        env:
+          STATE_KEY: ${{ secrets.STATE_KEY }}
+        run: ./state.sh restore jobs
       - name: Scan
         env:
           FLIP_TG_TOKEN: ${{ secrets.FLIP_TG_TOKEN }}
@@ -29,3 +35,8 @@ jobs:
         env:
           STATE_KEY: ${{ secrets.STATE_KEY }}
         run: ./state.sh save flip
+      - name: Save job leads
+        if: always() && steps.jobs.outcome == 'success' && hashFiles('.jobs-dirty') != ''
+        env:
+          STATE_KEY: ${{ secrets.STATE_KEY }}
+        run: ./state.sh save jobs

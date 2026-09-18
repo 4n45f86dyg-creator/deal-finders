@@ -6,7 +6,7 @@ Replies in Telegram (commands.py): bought 3 40 · sold 3 90 · skip 3 · stock �
 """
 import json, re, statistics, sys, time, urllib.parse
 import commands
-from commands import STOCK_CAP, stock_of
+from commands import FAST, STOCK_CAP, ask_text, stock_of
 from common import (BUY_RX, CRACK_RX, JUNK_RX, SCRATCH_RX, Bot, State, age_hours, bump_day, clean, fetch, is_near, listing_details, now,
                     parse_feed, price_of, report_day, roadblock, safe_say, secret)
 
@@ -17,7 +17,7 @@ RATIO, MIN_PROFIT, FAR_PROFIT, MAX_RESALE, MIN_COMPS, MAX_BUY = 0.65, 20, 40, 15
 MAX_LOOKUPS, MAX_ALERTS, DAILY_CAP, MAX_AGE_MIN, CACHE_H = 8, 5, 15, 90, 6
 BULKY = ("washing-machine", "refrigerator", "fridge", "freezer", "cooker", "stove", "oven", "dishwasher", "centrifuge")
 TOP, DIGEST = 70, 50          # easy money (instant) needs score >= TOP · >= DIGEST: in the 20:00 evening report · below: logged
-FAST, EASY_PROFIT = 0.85, 30  # ss.lv ads at the going price stay up 9-22 days (measured 17.09) → relist 15% under to sell in ~3 days
+EASY_PROFIT = 30              # FAST (relist 15% under the going price) lives in commands.py — the replies quote it back
 
 
 def bot():
@@ -212,7 +212,7 @@ def alert_text(d):
     warn = "⚠️ very cheap — check it works, no prepayment\n" if d["price"] < 0.3 * d["going"] else ""
     night = "🌙 posted overnight — may be gone\n" if d.get("overnight") else ""
     return (f"🔥 EASY MONEY {d.get('score', 0)}/100 · #{d['no']}\nBuy €{d['price']:.0f} → relist ~€{d.get('relist', d['going']):.0f} · +€{d.get('profit', 0):.0f}\n"
-            f"{' · '.join(d.get('why', []))}\n{night}{warn}{d['title']}\n{d['link']}")
+            f"{' · '.join(d.get('why', []))}\n{night}{warn}{d['title']}\n{d['link']}\n{ask_text(d)}")
 
 
 def handle_replies(b, st, meta, deals):
@@ -285,6 +285,7 @@ def scan(dry=False):
             tier = "top" if easy else "worth_a_look" if pts >= DIGEST else "below"
             tiers[tier] += 1
             d = {"no": (deals[-1]["no"] + 1) if deals else 1, "at": t.strftime("%Y-%m-%d %H:%M"), "title": it["title"][:90],
+                 "model": query,
                  "link": it["link"], "price": it["price"], "going": going, "relist": round(FAST * going), "profit": round(profit),
                  "days_up": days_up, "comps": len(comps), "loc": det["loc"], "score": pts, "why": why, "tier": tier,
                  "state": "new" if tier == "top" else tier, "sent": False, "overnight": quiet}

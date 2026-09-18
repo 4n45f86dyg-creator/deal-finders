@@ -6,7 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 key = subprocess.run(["security", "find-generic-password", "-a", getpass.getuser(), "-s", "deal-finders-state-key", "-w"],
                      capture_output=True, text=True).stdout.strip()
-for name in ("flip", "free", "report"):
+for name in ("flip", "free", "jobs", "report"):
     if subprocess.run(["git", "-C", str(ROOT), "fetch", "-q", "origin", f"state-{name}"], capture_output=True).returncode:
         print(f"{name}: no state on GitHub yet")
         continue
@@ -21,6 +21,8 @@ for name in ("flip", "free", "report"):
         base = Path(d) / name
         meta = json.loads((base / "meta.json").read_text()) if (base / "meta.json").exists() else {}
         deals = json.loads((base / "deals.json").read_text()) if (base / "deals.json").exists() else []
+        if not deals and (base / "leads.json").exists():
+            deals = json.loads((base / "leads.json").read_text())      # the job watcher keeps leads, not deals
         log = (base / "log.txt").read_text().splitlines() if (base / "log.txt").exists() else []
     print(f"== {name}: last run {meta.get('last_run', '?')}")
     days = meta.get("days", {})
@@ -32,6 +34,6 @@ for name in ("flip", "free", "report"):
     money = sum(x.get("sold", 0) - x.get("bought", 0) for x in deals if x.get("state") == "sold")
     print(f"   deals by state {states} · profit €{money:.0f}")
     for x in deals[-5:]:
-        print(f"   #{x['no']} {x['at']} {x.get('state')} {x.get('price', 0):.0f}€ {x['title'][:50]}")
+        print(f"   #{x['no']} {x.get('at', '')} {x.get('state')} {x.get('price', 0):.0f}€ {(x.get('title') or x.get('name', ''))[:50]}")
     errs = [l for l in log if "error " in l or "error:" in l][-3:]
     print(f"   recent errors: {errs or 'none'}")

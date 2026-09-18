@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Everything Boss can reply to the flip bot from his phone. flip.py polls Telegram and calls handle()."""
 import re
-from common import ROOT, State, now, report_day
+from common import ROOT, State, days_since, now, report_day
 
 STOCK_CAP = 300                                    # max unsold stock in euros before deal alerts pause
 MILESTONES = (100, 250, 500, 1000, 2500)
+FAST = 0.85          # ss.lv ads at the going price stay up 9-22 days (measured 17.09) → relist 15% under to sell in ~3 days
+HOLD_DAYS = 5        # bought and still unsold after this many days: drop the price or sell at cost
+JOBS_DIRTY = ROOT / ".jobs-dirty"                  # flip.yml saves the job leads back only when Boss changed one here
 HELP = ("What you can send me:\n"
         "bought 3 40 — you bought deal #3 for €40\n"
         "sold 3 90 — you sold deal #3 for €90\n"
@@ -15,6 +18,7 @@ HELP = ("What you can send me:\n"
         "notes — your last 10 lines\n"
         "leads — the next 5 businesses to call\n"
         "lead done 2 — cross lead #2 off the list\n"
+        "lead skip 2 — drop #2 and never show that name again\n"
         "help — this list")
 SHORT = ("Didn't get that. Reply: bought 3 40 · sold 3 90 · skip 3 · stock · status · "
          "log <what happened> · notes · leads · lead done 2 · help")
@@ -41,6 +45,44 @@ def stock_text(deals):
             f"Sold: {len(sold)} · profit €{profit_of(deals):.0f}\nDeals sent so far: {sum(1 for d in deals if d.get('sent'))}")
 
 
+SELL_RX = re.compile(r"^\W*(pārdodu|pārdodam|pārdod|atdodu|продаю|продам|продается|продаётся|selling|for sale)\b[\s:,.\-–]*", re.I)
+
+
+def item_name(d):
+    """Short name for the thing: the model the finder matched, else the front of the listing title."""
+    name = (d.get("model") or "").strip()
+    if not name:
+        t = SELL_RX.sub("", (d.get("title") or "").strip())
+        t = re.split(r"[.,;!?\n(]|\s[-–]\s", t)[0].strip()
+        while len(t) > 40 and " " in t:
+            t = t.rsplit(" ", 1)[0]
+        name = t[:40]
+    return name or "prece"
+
+
+def ask_text(d):
+    """The Latvian line Boss copies straight into the ss.lv form or WhatsApp. Kept short so it pastes in one go."""
+    msg = f"Sveiki! Vai {item_name(d)} vēl ir pieejams? Varu šodien izbraukt un samaksāt skaidrā."
+    return msg if len(msg) <= 200 else msg[:196].rsplit(" ", 1)[0] + " ..."
+
+
+def relist_prices(d):
+    """What to ask when it goes back up: the going price, and 15% under it for a sale in days."""
+    going = round(d.get("going") or d.get("price", 0))
+    return going, round(FAST * going)
+
+
+def ad_text(d):
+    """Four lines Boss pastes into a fresh ss.lv ad when he relists it."""
+    _, fast = relist_prices(d)
+    why = d.get("why", [])
+    cond = "Lietots, nelieli skrāpējumi, viss darbojas." if any("scratch" in w for w in why) else "Lietots, viss darbojas."
+    battery = next((w for w in why if w.startswith("battery ")), "")
+    if battery:
+        cond += f" Akumulators {battery.split()[1]}."
+    return "\n".join([item_name(d), cond, f"Cena: {fast} EUR", "Rīga, var apskatīt."])
+
+
 def deal_reply(cmd, w, ctx):
     """bought N price · sold N price · skip N — the numbers under every deal alert."""
     deals = ctx.deals
@@ -59,6 +101,11 @@ def deal_reply(cmd, w, ctx):
     else:
         d.update(state="sold", sold=amount, sold_at=f"{now():%Y-%m-%d}")
     msg = f"#{d['no']} {cmd} €{amount:.0f}. Stock now €{stock_of(deals):.0f}."
+    if cmd == "bought":
+        going, fast = relist_prices(d)
+        msg += (f"\nRelist at €{going} · fast sale €{fast} (sells in days)\n"
+                f"Ad text to paste:\n{ad_text(d)}\n"
+                f"Not sold in {HOLD_DAYS} days → drop the price or sell at cost.")
     if stock_of(deals) > STOCK_CAP:
         msg += f"\n⚠️ Over the €{STOCK_CAP} cap — new deals pause until you sell."
     if cmd == "sold":
@@ -95,27 +142,53 @@ def notes_text(ctx):
     return f"Last {len(lines)} notes, newest first:\n" + "\n".join(lines)
 
 
+def lead_store(ctx):
+    """Leads come from the job watcher's state when this run has it mounted; otherwise the old list in the flip state."""
+    jobs = State("jobs") if (ROOT / "state" / "jobs" / "leads.json").exists() else None
+    return (jobs, True) if jobs else (ctx.st, False)
+
+
+def save_leads(st, leads, from_jobs):
+    st.save("leads.json", leads)
+    if from_jobs:
+        JOBS_DIRTY.write_text("1")
+
+
 def leads_text(ctx):
-    leads = ctx.st.load("leads.json", [])
+    st, _ = lead_store(ctx)
+    leads = st.load("leads.json", [])
     if not leads:
-        return "No lead list loaded yet — HQ puts it here."
-    left = [x for x in leads if x.get("state") != "done"]
+        return "No lead list loaded yet — the job watcher fills it every weekday morning."
+    left = [x for x in leads if x.get("state") == "new" or x.get("state") is None]
     if not left:
-        return f"All {len(leads)} leads worked. Tell HQ to load the next list."
-    lines = [f"#{x['no']} {x.get('where', '')} · {(x.get('name') or x.get('what') or '')}\n{x.get('link', '')}" for x in left[:5]]
+        return f"All {len(leads)} leads worked. The job watcher adds more tomorrow morning."
+    lines = []
+    for x in left[:5]:
+        bits = " · ".join(b for b in (x.get("where", ""), x.get("name") or x.get("what") or "", x.get("pay") or "") if b and b != "?")
+        lines.append(f"#{x['no']} {bits}\n{x.get('link', '')}")
     return f"Next {len(lines)} to call ({len(left)} left):\n" + "\n".join(lines) + "\nDone with one: lead done 1"
 
 
-def lead_done(w, ctx):
-    if len(w) < 3 or w[1].lower() != "done" or not w[2].isdigit():
-        return "Cross one off like this: lead done 2"
-    leads = ctx.st.load("leads.json", [])
+def lead_reply(w, ctx):
+    """lead done 2 — called it. lead skip 2 — wrong sort of business, and never show that name again."""
+    what = w[1].lower() if len(w) > 1 else ""
+    if what not in ("done", "skip") or len(w) < 3 or not w[2].isdigit():
+        return "Cross one off like this: lead done 2 · or drop it: lead skip 2"
+    st, from_jobs = lead_store(ctx)
+    leads = st.load("leads.json", [])
     x = next((y for y in leads if y.get("no") == int(w[2])), None)
     if not x:
         return f"No lead #{w[2]}."
-    x["state"] = "done"
-    ctx.st.save("leads.json", leads)
-    return f"Lead #{x['no']} done. {sum(1 for y in leads if y.get('state') != 'done')} left."
+    x["state"] = "done" if what == "done" else "skipped"
+    if what == "skip" and from_jobs:
+        skipped = st.load("skipped.json", [])
+        first = " ".join((x.get("name") or "").split()[:3]).lower()
+        if first and first not in skipped:
+            skipped.append(first)
+            st.save("skipped.json", skipped[-200:])
+    save_leads(st, leads, from_jobs)
+    left = sum(1 for y in leads if y.get("state") == "new")
+    return f"Lead #{x['no']} {x['state']}. {left} left."
 
 
 def day_counts(meta, day):
@@ -162,7 +235,7 @@ def handle(text, ctx):
     if cmd in ("leads", "/leads"):
         return leads_text(ctx)
     if cmd in ("lead", "/lead"):
-        return lead_done(w, ctx)
+        return lead_reply(w, ctx)
     if cmd in ("stock", "/stock"):
         return stock_text(ctx.deals)
     if cmd in ("status", "/status"):

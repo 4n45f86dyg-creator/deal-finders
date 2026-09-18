@@ -5,14 +5,17 @@
   python3 evening.py --print    prints only
 """
 import sys
-from common import Bot, State, age_hours, now, safe_say, secret
+from commands import HOLD_DAYS, item_name
+from common import Bot, State, age_hours, days_since, now, safe_say, secret
 
 
 def build(t):
     today = t.strftime("%Y-%m-%d")
     flip_meta, flip_deals = State("flip").load("meta.json", {}), State("flip").load("deals.json", [])
     free_meta, free_deals = State("free").load("meta.json", {}), State("free").load("deals.json", [])
+    jobs_meta, job_leads = State("jobs").load("meta.json", {}), State("jobs").load("leads.json", [])
     f, g = flip_meta.get("days", {}).get(today, {}), free_meta.get("days", {}).get(today, {})
+    j = jobs_meta.get("days", {}).get(today, {})
     recent = [d for d in flip_deals if d.get("state") == "worth_a_look" and age_hours(d["at"], t) <= 24]
     looks = sorted(recent, key=lambda d: -d.get("score", 0))[:5]
     free_list = [d for d in free_deals if d.get("state") == "listed" and age_hours(d["at"], t) <= 24][:5]
@@ -24,7 +27,15 @@ def build(t):
              f"easy money {f.get('top', 0)} · worth a look {f.get('worth_a_look', 0)} · below bar {f.get('below_bar', 0)} · errors {f.get('errors', 0)}",
              f"Free finder: {g.get('runs', 0)} runs · {g.get('giveaways', 0)} giveaways · worth picking up {g.get('worth_it', 0)} "
              f"(instant {g.get('instant', 0)}) · errors {g.get('errors', 0)}",
+             f"Job watcher: {j.get('new', 0)} new leads today · "
+             f"{sum(1 for x in job_leads if x.get('state') == 'new')} businesses still to call",
              f"Money: stock {len(held)} items €{sum(d.get('bought', 0) for d in held):.0f} · sold {len(sold)} · profit €{profit:.0f}"]
+    slow = [(d, days_since(d.get("bought_at", ""), t)) for d in held]
+    slow = sorted([(d, n) for d, n in slow if n > HOLD_DAYS], key=lambda x: -x[1])
+    if slow:
+        lines.append(f"\n⏳ Held over {HOLD_DAYS} days — drop the price or sell at cost:")
+        for d, n in slow[:5]:
+            lines.append(f"#{d['no']} {n} days · paid €{d.get('bought', 0):.0f} · {item_name(d)}")
     last = [m.get("last_run", "") for m in (flip_meta, free_meta)]
     stale = [n for n, l in zip(("Flip", "Free"), last) if not l or age_hours(l, t) > 1]
     if stale:

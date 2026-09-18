@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Flip finder (HQ spec 004): new used items on ss.lv priced well under similar listings -> Telegram.
   python3 flip.py scan [--dry]   one run (GitHub runs it every 5 min; --dry prints, sends nothing)
-  python3 flip.py status         stock and profit
-Replies in Telegram: bought 3 40 · sold 3 90 · skip 3 · stock
+  python3 flip.py status         today's numbers, stock and profit
+Replies in Telegram (commands.py): bought 3 40 · sold 3 90 · skip 3 · stock · status · log · notes · leads · help
 """
 import json, re, statistics, sys, time, urllib.parse
+import commands
+from commands import STOCK_CAP, stock_of
 from common import (BUY_RX, CRACK_RX, JUNK_RX, SCRATCH_RX, Bot, State, age_hours, bump_day, clean, fetch, is_near, listing_details, now,
                     parse_feed, price_of, report_day, roadblock, safe_say, secret)
 
@@ -12,12 +14,10 @@ NAME = "Flip finder"
 DEAL_FEEDS = ["electronics/phones/mobile-phones", "construction/tools-and-technics", "electronics/home-appliances",
               "electronics/computers", "electronics/audio-video-dvd-sat", "for-children/carriages"]   # computers includes consoles + tablets
 RATIO, MIN_PROFIT, FAR_PROFIT, MAX_RESALE, MIN_COMPS, MAX_BUY = 0.65, 20, 40, 150, 3, 100
-STOCK_CAP, MAX_LOOKUPS, MAX_ALERTS, DAILY_CAP, MAX_AGE_MIN, CACHE_H = 300, 8, 5, 15, 90, 6
+MAX_LOOKUPS, MAX_ALERTS, DAILY_CAP, MAX_AGE_MIN, CACHE_H = 8, 5, 15, 90, 6
 BULKY = ("washing-machine", "refrigerator", "fridge", "freezer", "cooker", "stove", "oven", "dishwasher", "centrifuge")
-MILESTONES = (100, 250, 500, 1000, 2500)
 TOP, DIGEST = 70, 50          # easy money (instant) needs score >= TOP · >= DIGEST: in the 20:00 evening report · below: logged
 FAST, EASY_PROFIT = 0.85, 30  # ss.lv ads at the going price stay up 9-22 days (measured 17.09) → relist 15% under to sell in ~3 days
-HELP = "Reply: bought 3 40 · sold 3 90 · skip 3 · stock"
 
 
 def bot():
@@ -208,14 +208,6 @@ def score(price, comps, det, days_up=None):
     return pts, why
 
 
-def stock_of(deals):
-    return sum(d.get("bought", 0) for d in deals if d.get("state") == "bought")
-
-
-def profit_of(deals):
-    return sum(d["sold"] - d.get("bought", 0) for d in deals if d.get("state") == "sold")
-
-
 def alert_text(d):
     warn = "⚠️ very cheap — check it works, no prepayment\n" if d["price"] < 0.3 * d["going"] else ""
     night = "🌙 posted overnight — may be gone\n" if d.get("overnight") else ""
@@ -223,55 +215,13 @@ def alert_text(d):
             f"{' · '.join(d.get('why', []))}\n{night}{warn}{d['title']}\n{d['link']}")
 
 
-def status_text(deals):
-    held = [d for d in deals if d.get("state") == "bought"]
-    sold = [d for d in deals if d.get("state") == "sold"]
-    return (f"Stock: {len(held)} items, €{stock_of(deals):.0f} (cap €{STOCK_CAP})\n"
-            f"Sold: {len(sold)} · profit €{profit_of(deals):.0f}\nDeals sent so far: {sum(1 for d in deals if d.get('sent'))}")
-
-
-def handle_replies(b, meta, deals):
+def handle_replies(b, st, meta, deals):
+    """Boss's messages since the last run. Only his chat gets through (Bot.incoming); commands.py writes the reply."""
     offset, texts = b.incoming(meta.get("tg_offset", 0))
     meta["tg_offset"] = offset
+    ctx = commands.Ctx(st, deals, meta)
     for text in texts:
-        w = text.lower().replace("#", "").split()
-        cmd = w[0] if w else ""
-        if cmd in ("stock", "status", "/status"):
-            b.say(status_text(deals))
-            continue
-        if cmd in ("help", "/start", "/help", "hi"):
-            b.say(f"Deals arrive here by themselves.\n{HELP}")
-            continue
-        if cmd not in ("bought", "sold", "skip") or len(w) < 2 or not w[1].isdigit():
-            b.say(f"Didn't get that. {HELP}")
-            continue
-        d = next((x for x in deals if x["no"] == int(w[1])), None)
-        if not d:
-            b.say(f"No deal #{w[1]}.")
-            continue
-        if cmd == "skip":
-            d["state"] = "skipped"
-            b.say(f"#{d['no']} skipped.")
-            continue
-        amount = float(w[2].lstrip("€").replace(",", ".")) if len(w) > 2 and re.fullmatch(r"€?\d+([.,]\d+)?", w[2]) else None
-        if amount is None:
-            b.say(f"Add the price: {cmd} {d['no']} 40")
-            continue
-        before = profit_of(deals)
-        if cmd == "bought":
-            d.update(state="bought", bought=amount, bought_at=f"{now():%Y-%m-%d}")
-        else:
-            d.update(state="sold", sold=amount, sold_at=f"{now():%Y-%m-%d}")
-        msg = f"#{d['no']} {cmd} €{amount:.0f}. Stock now €{stock_of(deals):.0f}."
-        if stock_of(deals) > STOCK_CAP:
-            msg += f"\n⚠️ Over the €{STOCK_CAP} cap — new deals pause until you sell."
-        if cmd == "sold":
-            after = profit_of(deals)
-            msg += f"\nProfit on this one €{amount - d.get('bought', 0):.0f} · total €{after:.0f}"
-            if sum(1 for x in deals if x.get("state") == "sold") == 1:
-                msg += "\n🎉 First flip done."
-            msg += "".join(f"\n🏁 €{m} profit reached." for m in MILESTONES if before < m <= after)
-        b.say(msg)
+        b.say(commands.handle(text, ctx))
 
 
 def scan(dry=False):
@@ -362,7 +312,7 @@ def scan(dry=False):
                 d["sent"], d["sent_at"] = True, t.strftime("%Y-%m-%d %H:%M")
                 sent += 1
     try:
-        handle_replies(b, meta, deals)
+        handle_replies(b, st, meta, deals)
     except Exception as e:
         st.log(f"telegram error: {e}")
         errors += 1
@@ -384,6 +334,7 @@ if __name__ == "__main__":
     if cmd == "scan":
         scan(dry="--dry" in sys.argv)
     elif cmd == "status":
-        print(status_text(State("flip").load("deals.json", [])))
+        st = State("flip")
+        print(commands.status_text(commands.Ctx(st, st.load("deals.json", []), st.load("meta.json", {}))))
     else:
         print(__doc__)
